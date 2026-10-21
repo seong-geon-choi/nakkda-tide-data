@@ -10,9 +10,9 @@ import json
 import os
 import pathlib
 import sys
-import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 BASE = ("https://apis.data.go.kr/1192136/tideFcstHghLw/"
         "GetTideFcstHghLwApiService")
@@ -22,6 +22,7 @@ STATIONS = json.loads(
     (ROOT / "scripts" / "stations.json").read_text(encoding="utf-8"))
 
 PAST, FUTURE = 2, 14  # 윈도우: 오늘-2 ~ 오늘+14 (총 17일)
+WORKERS = 12          # 동시 호출 수 (GitHub 러너↔data.go.kr 지연 보상)
 
 
 def fetch_day(code, yyyymmdd):
@@ -73,17 +74,28 @@ def main():
     data_dir = ROOT / "data"
     data_dir.mkdir(exist_ok=True)
 
+    # (station_code, ymd) 작업을 병렬로 호출. 러너↔data.go.kr 왕복지연이 커서
+    # 직렬로 돌리면 1,000여 건에 10분 이상 걸리므로 동시 호출로 단축한다.
+    def task(code, ymd):
+        try:
+            return code, ymd, fetch_day(code, ymd)
+        except Exception as ex:  # noqa: BLE001 - 부분 실패 허용
+            print(f"WARN {code} {ymd}: {ex}", file=sys.stderr)
+            return code, ymd, []
+
+    days_by_station = {s["code"]: {} for s in STATIONS}
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futures = [ex.submit(task, s["code"], ymd)
+                   for s in STATIONS for ymd in dates]
+        for fut in futures:
+            code, ymd, ev = fut.result()
+            if ev:
+                days_by_station[code][ymd] = ev
+
     total_days = 0
     for s in STATIONS:
-        days = {}
-        for ymd in dates:
-            try:
-                ev = fetch_day(s["code"], ymd)
-                if ev:
-                    days[ymd] = ev
-            except Exception as ex:  # noqa: BLE001 - 부분 실패 허용
-                print(f"WARN {s['code']} {ymd}: {ex}", file=sys.stderr)
-            time.sleep(0.1)  # 완만한 호출
+        days = {ymd: days_by_station[s["code"]][ymd]
+                for ymd in dates if ymd in days_by_station[s["code"]]}
         (data_dir / f"{s['code']}.json").write_text(
             json.dumps({
                 "station": s["code"],

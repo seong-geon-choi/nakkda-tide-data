@@ -1,0 +1,40 @@
+name: update-tides
+
+on:
+  schedule:
+    - cron: "0 20 * * *"   # 매일 UTC 20:00 = KST 05:00
+  workflow_dispatch: {}      # 수동 실행 버튼
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-tides
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch tide predictions
+        env:
+          KHOA_SERVICE_KEY: ${{ secrets.KHOA_SERVICE_KEY }}
+        run: python scripts/fetch_tides.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "tide-bot"
+          git config user.email "tide-bot@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No changes."
+          else
+            git commit -m "chore: tide update $(date -u +%F)"
+            git push
+          fi
